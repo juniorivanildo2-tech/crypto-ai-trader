@@ -1,3 +1,3 @@
-print("Crypto AI Trader - V1")
-print("Sistema iniciado com sucesso!")
-print("Modo: PAPER TRADING")
+import streamlit as st
+
+exec(open("dashboard.py", encoding="utf-8").read())
