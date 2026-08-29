@@ -9,7 +9,7 @@ st.set_page_config(
 )
 
 st.title("₿ Crypto AI Trader")
-st.subheader("Paper Trading V1")
+st.subheader("Paper Trading V2")
 
 st.divider()
 
@@ -20,21 +20,13 @@ crypto = st.selectbox(
     ["Bitcoin (BTC)", "Ethereum (ETH)", "Solana (SOL)"]
 )
 
-symbols = {
-    "Bitcoin (BTC)": "BTCUSDT",
-    "Ethereum (ETH)": "ETHUSDT",
-    "Solana (SOL)": "SOLUSDT"
+ids = {
+    "Bitcoin (BTC)": "bitcoin",
+    "Ethereum (ETH)": "ethereum",
+    "Solana (SOL)": "solana"
 }
 
-symbol = symbols[crypto]
-
 try:
-    ids = {
-        "Bitcoin (BTC)": "bitcoin",
-        "Ethereum (ETH)": "ethereum",
-        "Solana (SOL)": "solana"
-    }
-
     url = (
         "https://api.coingecko.com/api/v3/simple/price"
         f"?ids={ids[crypto]}&vs_currencies=usd"
@@ -52,8 +44,25 @@ try:
 
     st.success("🟢 Mercado conectado")
 
+    st.divider()
+
+    st.header("🤖 Sinal do Trader")
+
+    # Estratégia inicial de segurança:
+    # nesta versão o sistema ainda não compra nem vende.
+    # Ele apenas monitora o mercado.
+
+    signal = "HOLD"
+    reason = "Aguardando análise dos dados históricos."
+
+    st.metric("Sinal atual", signal)
+
+    st.warning(
+        f"🟡 {reason}"
+    )
+
 except Exception:
-    st.error("Não foi possível obter o preço agora.")
+    st.error("Não foi possível obter os dados do mercado.")
 
 st.divider()
 
@@ -62,14 +71,28 @@ st.header("💰 Conta Virtual")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.metric("Saldo Virtual", "$10,000.00")
+    st.metric(
+        "Saldo Virtual",
+        "$10,000.00"
+    )
 
 with col2:
-    st.metric("Lucro/Prejuízo", "$0.00")
+    st.metric(
+        "Lucro/Prejuízo",
+        "$0.00"
+    )
 
 with col3:
-    st.metric("Posição", "Nenhuma")
+    st.metric(
+        "Posição",
+        "Nenhuma"
+    )
 
 st.divider()
 
-st.info("🤖 IA Trader: aguardando sinais de mercado...")
+st.header("📋 Status")
+
+st.info(
+    "🤖 Trader em modo PAPER TRADING. "
+    "Nenhuma ordem real será enviada."
+)
