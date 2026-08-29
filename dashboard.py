@@ -1,28 +1,52 @@
 import streamlit as st
 import urllib.request
 import json
+
 from paper_trader import PaperTrader
+
+
 st.set_page_config(
     page_title="Crypto AI Trader",
     page_icon="₿",
     layout="wide"
 )
+
+
+# =========================
+# CONTA VIRTUAL
+# =========================
+
 if "trader" not in st.session_state:
     st.session_state.trader = PaperTrader(10000.0)
 
 trader = st.session_state.trader
+
+
+# =========================
+# CABEÇALHO
+# =========================
 
 st.title("₿ Crypto AI Trader")
 st.subheader("Paper Trading V2")
 
 st.divider()
 
+
+# =========================
+# MERCADO
+# =========================
+
 st.header("📊 Mercado")
 
 crypto = st.selectbox(
     "Escolha a criptomoeda",
-    ["Bitcoin (BTC)", "Ethereum (ETH)", "Solana (SOL)"]
+    [
+        "Bitcoin (BTC)",
+        "Ethereum (ETH)",
+        "Solana (SOL)"
+    ]
 )
+
 
 ids = {
     "Bitcoin (BTC)": "bitcoin",
@@ -30,14 +54,31 @@ ids = {
     "Solana (SOL)": "solana"
 }
 
+
+symbols = {
+    "Bitcoin (BTC)": "BTCUSDT",
+    "Ethereum (ETH)": "ETHUSDT",
+    "Solana (SOL)": "SOLUSDT"
+}
+
+
+price = None
+
+
+# =========================
+# PREÇO ATUAL
+# =========================
+
 try:
+
     url = (
         "https://api.coingecko.com/api/v3/simple/price"
         f"?ids={ids[crypto]}&vs_currencies=usd"
     )
 
     response = urllib.request.urlopen(url, timeout=10)
-    data = json.loads(response.read())
+
+    data = json.loads(response.read().decode())
 
     price = float(data[ids[crypto]]["usd"])
 
@@ -48,80 +89,248 @@ try:
 
     st.success("🟢 Mercado conectado")
 
-    st.divider()
+except Exception as e:
 
-    st.header("🤖 Sinal do Trader")
+    st.error("🔴 Não foi possível obter o preço agora.")
 
-    # Análise técnica - Paper Trading V1
-try:
-    symbol = symbols[crypto]
-
-    url = (
-        f"https://api.binance.com/api/v3/klines"
-        f"?symbol={symbol}&interval=5m&limit=30"
-    )
-
-    response = urllib.request.urlopen(url, timeout=10)
-    candles = json.loads(response.read().decode())
-
-    closes = [float(candle[4]) for candle in candles]
-
-    preco = closes[-1]
-    media_5 = sum(closes[-5:]) / 5
-    media_20 = sum(closes[-20:]) / 20
-
-    if media_5 > media_20 * 1.002:
-        sinal = "COMPRA"
-        reason = "Tendência de alta detectada."
-    elif media_5 < media_20 * 0.998:
-        sinal = "VENDA"
-        reason = "Tendência de baixa detectada."
-    else:
-        sinal = "HOLD"
-        reason = "Mercado sem tendência clara."
-
-except Exception:
-    sinal = "HOLD"
-    reason = "Não foi possível realizar a análise agora."
-
-st.metric("Sinal atual", sinal)
-
-st.warning(
-    f"🟡 {reason}"
-)
-
-except Exception:
-    st.error("Não foi possível obter os dados do mercado.")
 
 st.divider()
+
+
+# =========================
+# SINAL DO TRADER
+# =========================
+
+st.header("🤖 Sinal do Trader")
+
+
+signal = "HOLD"
+reason = "Aguardando análise do mercado."
+
+
+if price is not None:
+
+    try:
+
+        symbol = symbols[crypto]
+
+        url = (
+            "https://api.binance.com/api/v3/klines"
+            f"?symbol={symbol}&interval=5m&limit=20"
+        )
+
+        response = urllib.request.urlopen(url, timeout=10)
+
+        candles = json.loads(
+            response.read().decode()
+        )
+
+        closes = [
+            float(candle[4])
+            for candle in candles
+        ]
+
+        media_5 = sum(closes[-5:]) / 5
+        media_20 = sum(closes[-20:]) / 20
+
+        if media_5 > media_20 * 1.002:
+
+            signal = "COMPRA"
+
+            reason = (
+                "Tendência de alta detectada "
+                "pelas médias móveis."
+            )
+
+        elif media_5 < media_20 * 0.998:
+
+            signal = "VENDA"
+
+            reason = (
+                "Tendência de baixa detectada "
+                "pelas médias móveis."
+            )
+
+        else:
+
+            signal = "HOLD"
+
+            reason = (
+                "Mercado sem tendência clara."
+            )
+
+    except Exception:
+
+        signal = "HOLD"
+
+        reason = (
+            "Não foi possível realizar a análise."
+        )
+
+
+st.metric(
+    "Sinal atual",
+    signal
+)
+
+st.info(
+    f"💡 {reason}"
+)
+
+
+st.divider()
+
+
+# =========================
+# OPERAÇÕES
+# =========================
+
+st.header("💱 Operação Simulada")
+
+col1, col2 = st.columns(2)
+
+
+with col1:
+
+    valor_compra = st.number_input(
+        "Valor para comprar (US$)",
+        min_value=10.0,
+        max_value=10000.0,
+        value=1000.0,
+        step=100.0
+    )
+
+    if st.button(
+        "🟢 COMPRAR",
+        use_container_width=True
+    ):
+
+        if price is not None:
+
+            resultado = trader.comprar(
+                price,
+                valor_compra
+            )
+
+            st.success(resultado)
+
+            st.rerun()
+
+        else:
+
+            st.error(
+                "Preço indisponível."
+            )
+
+
+with col2:
+
+    st.write("Venda toda a posição atual.")
+
+    if st.button(
+        "🔴 VENDER",
+        use_container_width=True
+    ):
+
+        if price is not None:
+
+            resultado = trader.vender(
+                price
+            )
+
+            st.success(resultado)
+
+            st.rerun()
+
+        else:
+
+            st.error(
+                "Preço indisponível."
+            )
+
+
+st.divider()
+
+
+# =========================
+# CONTA VIRTUAL
+# =========================
 
 st.header("💰 Conta Virtual")
 
+
+if price is not None:
+
+    patrimonio = trader.patrimonio(price)
+
+    resultado = trader.resultado(price)
+
+else:
+
+    patrimonio = trader.saldo
+    resultado = 0.0
+
+
 col1, col2, col3 = st.columns(3)
 
+
 with col1:
+
     st.metric(
-        "Saldo Virtual",
-        "$10,000.00"
+        "Saldo disponível",
+        f"${trader.saldo:,.2f}"
     )
+
 
 with col2:
+
     st.metric(
-        "Lucro/Prejuízo",
-        "$0.00"
+        "Patrimônio",
+        f"${patrimonio:,.2f}"
     )
 
+
 with col3:
+
     st.metric(
-        "Posição",
-        "Nenhuma"
+        "Lucro / Prejuízo",
+        f"${resultado:,.2f}"
     )
+
 
 st.divider()
 
-st.header("📋 Status")
 
-st.info(
-    "🤖 Trader em modo PAPER TRADING. "
-    "Nenhuma ordem real será enviada."
+# =========================
+# POSIÇÃO
+# =========================
+
+st.header("📦 Posição")
+
+
+if trader.posicao > 0:
+
+    st.write(
+        f"Cripto: **{crypto}**"
+    )
+
+    st.write(
+        f"Quantidade: **{trader.posicao:.6f}**"
+    )
+
+    st.write(
+        f"Preço de entrada: "
+        f"**${trader.preco_entrada:,.2f}**"
+    )
+
+else:
+
+    st.write("Nenhuma posição aberta.")
+
+
+st.divider()
+
+
+st.caption(
+    "⚠️ Paper Trading: todas as operações são simuladas."
 )
