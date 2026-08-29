@@ -91,7 +91,7 @@ try:
 
 except Exception as e:
 
-    st.error("🔴 Não foi possível obter o preço agora.")
+    st.error(f"🔴 Erro na análise: {e}")
 
 
 st.divider()
