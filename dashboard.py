@@ -48,18 +48,43 @@ try:
 
     st.header("🤖 Sinal do Trader")
 
-    inicial de segurança:
-    # nesta versão o sistema ainda não compra nem vende.
-    # Ele apenas monitora o mercado.
+    # Análise técnica - Paper Trading V1
+try:
+    symbol = symbols[crypto]
 
-    signal = "HOLD"
-    reason = "Aguardando análise dos dados históricos."
-    
-    st.metric("Sinal atual", sinal)
-
-    st.warning(
-        f"🟡 {reason}"
+    url = (
+        f"https://api.binance.com/api/v3/klines"
+        f"?symbol={symbol}&interval=5m&limit=30"
     )
+
+    response = urllib.request.urlopen(url, timeout=10)
+    candles = json.loads(response.read().decode())
+
+    closes = [float(candle[4]) for candle in candles]
+
+    preco = closes[-1]
+    media_5 = sum(closes[-5:]) / 5
+    media_20 = sum(closes[-20:]) / 20
+
+    if media_5 > media_20 * 1.002:
+        sinal = "COMPRA"
+        reason = "Tendência de alta detectada."
+    elif media_5 < media_20 * 0.998:
+        sinal = "VENDA"
+        reason = "Tendência de baixa detectada."
+    else:
+        sinal = "HOLD"
+        reason = "Mercado sem tendência clara."
+
+except Exception:
+    sinal = "HOLD"
+    reason = "Não foi possível realizar a análise agora."
+
+st.metric("Sinal atual", sinal)
+
+st.warning(
+    f"🟡 {reason}"
+)
 
 except Exception:
     st.error("Não foi possível obter os dados do mercado.")
