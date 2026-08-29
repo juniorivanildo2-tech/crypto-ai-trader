@@ -4,10 +4,12 @@ import numpy as np
 import requests
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ============================================================
-# CONFIGURAÇÃO
+# CRYPTO AI TRADER V4
+# Motor de aprendizado + análise técnica + Paper Trading
+# Sem sklearn
 # ============================================================
 
 st.set_page_config(
@@ -16,85 +18,109 @@ st.set_page_config(
     layout="wide"
 )
 
-LEARNING_FILE = "learning_data.json"
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+APP_VERSION = "V4"
+STATE_FILE = "ai_learning.json"
+
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 
 COINS = {
     "Bitcoin": "BTCUSDT",
     "Ethereum": "ETHUSDT",
-    "BNB": "BNBUSDT",
     "Solana": "SOLUSDT",
+    "BNB": "BNBUSDT",
     "XRP": "XRPUSDT",
     "Cardano": "ADAUSDT",
     "Dogecoin": "DOGEUSDT"
 }
 
+INTERVAL = "1h"
+CANDLE_LIMIT = 300
+
 # ============================================================
-# MOTOR DE APRENDIZADO
+# ESTADO DO APRENDIZADO
 # ============================================================
 
-def load_learning():
-    default = {
-        "total_analyses": 0,
-        "wins": 0,
-        "losses": 0,
-        "signals": {
-            "BUY": {"count": 0, "wins": 0},
-            "SELL": {"count": 0, "wins": 0},
-            "HOLD": {"count": 0, "wins": 0}
-        },
+DEFAULT_LEARNING = {
+    "version": 4,
+    "assets": {},
+    "total_predictions": 0,
+    "correct_predictions": 0,
+    "wrong_predictions": 0
+}
+
+
+def create_asset_state():
+    return {
+        "predictions": [],
+        "correct": 0,
+        "wrong": 0,
+        "signals": 0,
+
         "weights": {
             "trend": 1.0,
             "rsi": 1.0,
-            "macd": 1.0,
             "momentum": 1.0,
+            "macd": 1.0,
             "volume": 1.0
         }
     }
 
+
+def load_learning():
+    if not os.path.exists(STATE_FILE):
+        return DEFAULT_LEARNING.copy()
+
     try:
-        if os.path.exists(LEARNING_FILE):
-            with open(LEARNING_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-            for key in default:
-                if key not in data:
-                    data[key] = default[key]
+        if not isinstance(data, dict):
+            return DEFAULT_LEARNING.copy()
 
-            return data
+        data.setdefault("version", 4)
+        data.setdefault("assets", {})
+        data.setdefault("total_predictions", 0)
+        data.setdefault("correct_predictions", 0)
+        data.setdefault("wrong_predictions", 0)
+
+        return data
 
     except Exception:
-        pass
-
-    return default
+        return DEFAULT_LEARNING.copy()
 
 
 def save_learning(data):
     try:
-        with open(LEARNING_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
 
 
-learning = load_learning()
+if "learning" not in st.session_state:
+    st.session_state.learning = load_learning()
+
+
+learning = st.session_state.learning
+
 
 # ============================================================
-# DADOS DE MERCADO
+# FUNÇÕES DE MERCADO
 # ============================================================
 
-@st.cache_data(ttl=60)
-def get_market_data(symbol, interval="1h", limit=300):
-
-    url = "https://api.binance.com/api/v3/klines"
-
+def get_market_data(symbol):
     params = {
         "symbol": symbol,
-        "interval": interval,
-        "limit": limit
+        "interval": INTERVAL,
+        "limit": CANDLE_LIMIT
     }
 
     response = requests.get(
-        url,
+        BINANCE_URL,
         params=params,
         timeout=15
     )
@@ -113,8 +139,8 @@ def get_market_data(symbol, interval="1h", limit=300):
         "close_time",
         "quote_volume",
         "trades",
-        "buy_volume",
-        "buy_quote_volume",
+        "taker_base",
+        "taker_quote",
         "ignore"
     ]
 
@@ -128,12 +154,13 @@ def get_market_data(symbol, interval="1h", limit=300):
         "volume"
     ]
 
-    for column in numeric_columns:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["timestamp"] = pd.to_datetime(
+    df["datetime"] = pd.to_datetime(
         df["open_time"],
-        unit="ms"
+        unit="ms",
+        utc=True
     )
 
     return df
@@ -143,708 +170,774 @@ def get_market_data(symbol, interval="1h", limit=300):
 # INDICADORES
 # ============================================================
 
-def calculate_indicators(df):
-
-    df = df.copy()
-
-    # SMA
-    df["sma5"] = df["close"].rolling(5).mean()
-    df["sma20"] = df["close"].rolling(20).mean()
-    df["sma50"] = df["close"].rolling(50).mean()
-
-    # EMA
-    df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-    df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
-
-    # RSI
-    delta = df["close"].diff()
+def calculate_rsi(series, period=14):
+    delta = series.diff()
 
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    df["rsi"] = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
 
-    # MACD
-    ema12 = df["close"].ewm(
-        span=12,
+    return rsi.fillna(50)
+
+
+def calculate_ema(series, period):
+    return series.ewm(
+        span=period,
         adjust=False
     ).mean()
 
-    ema26 = df["close"].ewm(
-        span=26,
-        adjust=False
-    ).mean()
 
-    df["macd"] = ema12 - ema26
+def calculate_macd(series):
+    ema12 = calculate_ema(series, 12)
+    ema26 = calculate_ema(series, 26)
 
-    df["macd_signal"] = df["macd"].ewm(
-        span=9,
-        adjust=False
-    ).mean()
+    macd = ema12 - ema26
+    signal = calculate_ema(macd, 9)
 
-    df["macd_hist"] = (
-        df["macd"] -
-        df["macd_signal"]
-    )
+    histogram = macd - signal
 
-    # Momentum
+    return macd, signal, histogram
+
+
+def add_indicators(df):
+    df = df.copy()
+
+    df["ema5"] = calculate_ema(df["close"], 5)
+    df["ema20"] = calculate_ema(df["close"], 20)
+    df["ema50"] = calculate_ema(df["close"], 50)
+
+    df["rsi"] = calculate_rsi(df["close"], 14)
+
+    (
+        df["macd"],
+        df["macd_signal"],
+        df["macd_hist"]
+    ) = calculate_macd(df["close"])
+
     df["momentum"] = (
-        df["close"].pct_change(10) * 100
+        df["close"].pct_change(5) * 100
     )
 
-    # Volatilidade
+    df["volume_ma"] = (
+        df["volume"].rolling(20).mean()
+    )
+
+    df["volume_ratio"] = (
+        df["volume"] /
+        df["volume_ma"].replace(0, np.nan)
+    )
+
     df["volatility"] = (
         df["close"].pct_change()
         .rolling(20)
         .std() * 100
     )
 
-    # Volume médio
-    df["volume_ma"] = (
-        df["volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    df["volume_ratio"] = (
-        df["volume"] /
-        df["volume_ma"]
-    )
-
     return df
 
 
 # ============================================================
-# MOTOR DE ANÁLISE
+# MOTOR DE INTELIGÊNCIA
 # ============================================================
 
-def analyze_market(df):
+def get_asset_state(asset):
+    if asset not in learning["assets"]:
+        learning["assets"][asset] = create_asset_state()
 
-    latest = df.iloc[-1]
+    state = learning["assets"][asset]
 
-    score = 0.0
-    max_score = 0.0
+    state.setdefault("predictions", [])
+    state.setdefault("correct", 0)
+    state.setdefault("wrong", 0)
+    state.setdefault("signals", 0)
 
-    reasons = []
+    state.setdefault(
+        "weights",
+        {
+            "trend": 1.0,
+            "rsi": 1.0,
+            "momentum": 1.0,
+            "macd": 1.0,
+            "volume": 1.0
+        }
+    )
 
-    weights = learning["weights"]
+    return state
+
+
+def normalize_weights(weights):
+    for key in weights:
+        weights[key] = max(
+            0.25,
+            min(3.0, float(weights[key]))
+        )
+
+
+def calculate_signal(df, asset):
+    state = get_asset_state(asset)
+    weights = state["weights"]
+
+    row = df.iloc[-1]
+
+    scores = {
+        "BUY": 0.0,
+        "SELL": 0.0
+    }
+
+    explanations = []
 
     # --------------------------------------------------------
     # TENDÊNCIA
     # --------------------------------------------------------
 
-    trend_weight = weights["trend"]
+    if row["ema5"] > row["ema20"] > row["ema50"]:
+        scores["BUY"] += 2.0 * weights["trend"]
+        explanations.append("Tendência de alta")
 
-    if latest["ema9"] > latest["ema21"]:
-        score += 2 * trend_weight
-        reasons.append("Tendência de curto prazo positiva.")
-    else:
-        score -= 2 * trend_weight
-        reasons.append("Tendência de curto prazo negativa.")
-
-    max_score += 2 * trend_weight
+    elif row["ema5"] < row["ema20"] < row["ema50"]:
+        scores["SELL"] += 2.0 * weights["trend"]
+        explanations.append("Tendência de baixa")
 
     # --------------------------------------------------------
     # RSI
     # --------------------------------------------------------
 
-    rsi = latest["rsi"]
-    rsi_weight = weights["rsi"]
+    rsi = float(row["rsi"])
 
     if rsi < 30:
-        score += 2 * rsi_weight
-        reasons.append("RSI indica possível sobrevenda.")
+        scores["BUY"] += 1.5 * weights["rsi"]
+        explanations.append("RSI em região de sobrevenda")
+
     elif rsi > 70:
-        score -= 2 * rsi_weight
-        reasons.append("RSI indica possível sobrecompra.")
+        scores["SELL"] += 1.5 * weights["rsi"]
+        explanations.append("RSI em região de sobrecompra")
+
     elif rsi >= 50:
-        score += 0.5 * rsi_weight
-        reasons.append("RSI acima da região neutra.")
+        scores["BUY"] += 0.5 * weights["rsi"]
+
     else:
-        score -= 0.5 * rsi_weight
-        reasons.append("RSI abaixo da região neutra.")
-
-    max_score += 2 * rsi_weight
-
-    # --------------------------------------------------------
-    # MACD
-    # --------------------------------------------------------
-
-    macd_weight = weights["macd"]
-
-    if latest["macd"] > latest["macd_signal"]:
-        score += 2 * macd_weight
-        reasons.append("MACD favorece movimento comprador.")
-    else:
-        score -= 2 * macd_weight
-        reasons.append("MACD favorece movimento vendedor.")
-
-    max_score += 2 * macd_weight
+        scores["SELL"] += 0.5 * weights["rsi"]
 
     # --------------------------------------------------------
     # MOMENTUM
     # --------------------------------------------------------
 
-    momentum_weight = weights["momentum"]
+    momentum = float(row["momentum"])
 
-    if latest["momentum"] > 0:
-        score += 1.5 * momentum_weight
-        reasons.append("Momentum positivo.")
-    else:
-        score -= 1.5 * momentum_weight
-        reasons.append("Momentum negativo.")
+    if momentum > 0.5:
+        scores["BUY"] += 1.2 * weights["momentum"]
+        explanations.append("Momentum positivo")
 
-    max_score += 1.5 * momentum_weight
+    elif momentum < -0.5:
+        scores["SELL"] += 1.2 * weights["momentum"]
+        explanations.append("Momentum negativo")
+
+    # --------------------------------------------------------
+    # MACD
+    # --------------------------------------------------------
+
+    if row["macd_hist"] > 0:
+        scores["BUY"] += 1.2 * weights["macd"]
+        explanations.append("MACD favorece alta")
+
+    elif row["macd_hist"] < 0:
+        scores["SELL"] += 1.2 * weights["macd"]
+        explanations.append("MACD favorece baixa")
 
     # --------------------------------------------------------
     # VOLUME
     # --------------------------------------------------------
 
-    volume_weight = weights["volume"]
-
-    if latest["volume_ratio"] > 1.2:
-
-        if score > 0:
-            score += 1 * volume_weight
-            reasons.append("Volume acima da média confirma força compradora.")
-        else:
-            score -= 1 * volume_weight
-            reasons.append("Volume acima da média confirma força vendedora.")
-
-    max_score += 1 * volume_weight
-
-    # --------------------------------------------------------
-    # RESULTADO
-    # --------------------------------------------------------
-
-    percentage = (score / max_score) * 100
-
-    if percentage >= 25:
-        signal = "BUY"
-
-    elif percentage <= -25:
-        signal = "SELL"
-
-    else:
-        signal = "HOLD"
-
-    confidence = min(
-        95,
-        max(
-            50,
-            int(50 + abs(percentage) * 0.45)
-        )
+    volume_ratio = float(
+        row["volume_ratio"]
+        if not pd.isna(row["volume_ratio"])
+        else 1.0
     )
 
-    return {
+    if volume_ratio > 1.2:
+        if momentum >= 0:
+            scores["BUY"] += 0.8 * weights["volume"]
+            explanations.append("Volume acima da média")
+
+        else:
+            scores["SELL"] += 0.8 * weights["volume"]
+            explanations.append("Volume confirma pressão vendedora")
+
+    # --------------------------------------------------------
+    # DECISÃO
+    # --------------------------------------------------------
+
+    buy_score = scores["BUY"]
+    sell_score = scores["SELL"]
+
+    total = buy_score + sell_score
+
+    if total <= 0:
+        return "HOLD", 50, explanations, scores
+
+    difference = abs(buy_score - sell_score)
+
+    confidence = 50 + (
+        difference / total
+    ) * 50
+
+    confidence = max(
+        50,
+        min(95, confidence)
+    )
+
+    if difference < total * 0.15:
+        signal = "HOLD"
+        confidence = min(confidence, 65)
+
+    elif buy_score > sell_score:
+        signal = "BUY"
+
+    else:
+        signal = "SELL"
+
+    return (
+        signal,
+        round(confidence),
+        explanations,
+        scores
+    )
+
+
+# ============================================================
+# SISTEMA DE APRENDIZADO
+# ============================================================
+
+def register_prediction(
+    asset,
+    signal,
+    confidence,
+    price,
+    timestamp
+):
+    if signal == "HOLD":
+        return
+
+    state = get_asset_state(asset)
+
+    prediction = {
+        "id": f"{timestamp}_{price}",
+        "timestamp": timestamp,
         "signal": signal,
-        "confidence": confidence,
-        "score": score,
-        "percentage": percentage,
-        "reasons": reasons
+        "confidence": float(confidence),
+        "entry_price": float(price),
+        "evaluated": False
     }
 
+    # Evita registrar repetidamente exatamente a mesma previsão
+    for old in state["predictions"]:
+        if old.get("id") == prediction["id"]:
+            return
 
-# ============================================================
-# APRENDIZADO
-# ============================================================
+    state["predictions"].append(prediction)
+    state["signals"] += 1
 
-def update_learning(signal, result):
+    learning["total_predictions"] += 1
 
-    learning["total_analyses"] += 1
-
-    if signal not in learning["signals"]:
-        learning["signals"][signal] = {
-            "count": 0,
-            "wins": 0
-        }
-
-    learning["signals"][signal]["count"] += 1
-
-    if result == "WIN":
-
-        learning["wins"] += 1
-        learning["signals"][signal]["wins"] += 1
-
-        # Pequeno reforço
-        for key in learning["weights"]:
-            learning["weights"][key] *= 1.01
-
-    elif result == "LOSS":
-
-        learning["losses"] += 1
-
-        # Pequena redução
-        for key in learning["weights"]:
-            learning["weights"][key] *= 0.99
-
-    # Mantém pesos em uma faixa segura
-    for key in learning["weights"]:
-        learning["weights"][key] = min(
-            2.0,
-            max(
-                0.5,
-                learning["weights"][key]
-            )
-        )
+    # Mantém somente as últimas 500 previsões
+    if len(state["predictions"]) > 500:
+        state["predictions"] = state["predictions"][-500:]
 
     save_learning(learning)
 
 
-def learning_accuracy():
+def evaluate_predictions(asset, df):
+    state = get_asset_state(asset)
 
-    total = learning["wins"] + learning["losses"]
+    if len(df) < 6:
+        return
+
+    current_index = len(df) - 1
+
+    changed = False
+
+    for prediction in state["predictions"]:
+
+        if prediction.get("evaluated", False):
+            continue
+
+        try:
+            prediction_time = pd.to_datetime(
+                prediction["timestamp"],
+                utc=True
+            )
+
+            distances = (
+                df["datetime"] - prediction_time
+            ).abs()
+
+            start_index = int(
+                distances.argmin()
+            )
+
+        except Exception:
+            continue
+
+        # Espera pelo menos 3 candles para avaliar
+        if current_index - start_index < 3:
+            continue
+
+        future_index = min(
+            start_index + 3,
+            current_index
+        )
+
+        entry = float(
+            prediction["entry_price"]
+        )
+
+        future_price = float(
+            df.iloc[future_index]["close"]
+        )
+
+        signal = prediction["signal"]
+
+        if signal == "BUY":
+            correct = future_price > entry
+
+        elif signal == "SELL":
+            correct = future_price < entry
+
+        else:
+            correct = None
+
+        if correct is None:
+            continue
+
+        prediction["evaluated"] = True
+        prediction["result"] = (
+            "WIN" if correct else "LOSS"
+        )
+
+        prediction["exit_price"] = future_price
+
+        if correct:
+            state["correct"] += 1
+            learning["correct_predictions"] += 1
+        else:
+            state["wrong"] += 1
+            learning["wrong_predictions"] += 1
+
+        # ----------------------------------------------------
+        # APRENDIZADO ADAPTATIVO
+        # ----------------------------------------------------
+        #
+        # Quando acerta:
+        # aumenta ligeiramente os pesos.
+        #
+        # Quando erra:
+        # reduz ligeiramente os pesos.
+        #
+        # Isso não "garante" previsão futura.
+        # É um mecanismo adaptativo baseado no histórico.
+        # ----------------------------------------------------
+
+        weights = state["weights"]
+
+        if correct:
+            factor = 1.03
+        else:
+            factor = 0.97
+
+        for key in weights:
+            weights[key] *= factor
+
+        normalize_weights(weights)
+
+        changed = True
+
+    if changed:
+        save_learning(learning)
+
+
+def get_accuracy(asset):
+    state = get_asset_state(asset)
+
+    total = (
+        state["correct"] +
+        state["wrong"]
+    )
 
     if total == 0:
-        return 0
+        return None
 
-    return round(
-        (learning["wins"] / total) * 100,
-        1
-    )
+    return (
+        state["correct"] /
+        total
+    ) * 100
 
 
 # ============================================================
 # PAPER TRADING
 # ============================================================
 
-if "balance" not in st.session_state:
-    st.session_state.balance = 10000.0
-
-if "position" not in st.session_state:
-    st.session_state.position = None
-
-if "entry_price" not in st.session_state:
-    st.session_state.entry_price = 0.0
-
-if "trade_history" not in st.session_state:
-    st.session_state.trade_history = []
+def initialize_paper():
+    if "paper" not in st.session_state:
+        st.session_state.paper = {
+            "balance": 10000.0,
+            "initial_balance": 10000.0,
+            "position": None,
+            "trades": []
+        }
 
 
-def open_position(price, signal):
-
-    if st.session_state.position is not None:
-        return False
-
-    st.session_state.position = signal
-    st.session_state.entry_price = price
-
-    return True
+initialize_paper()
 
 
-def close_position(price):
+def open_paper_trade(
+    asset,
+    signal,
+    price,
+    confidence,
+    amount
+):
+    if signal not in ["BUY", "SELL"]:
+        return False, "Sinal HOLD não gera operação."
 
-    if st.session_state.position is None:
-        return None
+    paper = st.session_state.paper
 
-    entry = st.session_state.entry_price
+    if paper["position"] is not None:
+        return False, "Já existe uma posição aberta."
 
-    if st.session_state.position == "BUY":
+    if amount <= 0:
+        return False, "Valor inválido."
 
-        profit_percent = (
-            (price - entry) /
-            entry
-        ) * 100
+    if amount > paper["balance"]:
+        return False, "Saldo insuficiente."
 
-    else:
+    quantity = amount / price
 
-        profit_percent = (
-            (entry - price) /
-            entry
-        ) * 100
-
-    profit_money = (
-        st.session_state.balance *
-        profit_percent /
-        100
-    )
-
-    st.session_state.balance += profit_money
-
-    result = "WIN" if profit_money > 0 else "LOSS"
-
-    signal = st.session_state.position
-
-    update_learning(signal, result)
-
-    trade = {
-        "data": datetime.now().strftime(
-            "%d/%m/%Y %H:%M"
-        ),
-        "tipo": signal,
-        "entrada": round(entry, 2),
-        "saida": round(price, 2),
-        "resultado": result,
-        "lucro": round(profit_money, 2)
+    paper["position"] = {
+        "asset": asset,
+        "signal": signal,
+        "entry_price": price,
+        "quantity": quantity,
+        "amount": amount,
+        "confidence": confidence,
+        "opened_at": datetime.now(
+            timezone.utc
+        ).isoformat()
     }
 
-    st.session_state.trade_history.append(trade)
+    paper["balance"] -= amount
 
-    st.session_state.position = None
-    st.session_state.entry_price = 0.0
+    return True, "Operação simulada aberta."
 
-    return trade
+
+def close_paper_trade(price):
+    paper = st.session_state.paper
+
+    position = paper["position"]
+
+    if position is None:
+        return False, 0.0, "Não existe posição aberta."
+
+    entry = position["entry_price"]
+    quantity = position["quantity"]
+    signal = position["signal"]
+
+    if signal == "BUY":
+        pnl = (
+            price - entry
+        ) * quantity
+
+    else:
+        pnl = (
+            entry - price
+        ) * quantity
+
+    returned = position["amount"] + pnl
+
+    paper["balance"] += returned
+
+    trade = {
+        "asset": position["asset"],
+        "side": signal,
+        "entry": entry,
+        "exit": price,
+        "amount": position["amount"],
+        "pnl": pnl,
+        "opened_at": position["opened_at"],
+        "closed_at": datetime.now(
+            timezone.utc
+        ).isoformat()
+    }
+
+    paper["trades"].append(trade)
+    paper["position"] = None
+
+    return True, pnl, "Operação encerrada."
 
 
 # ============================================================
-# INTERFACE
+# CABEÇALHO
 # ============================================================
 
 st.title("🤖 Crypto AI Trader")
 
 st.caption(
-    "V4 • Inteligência de mercado • "
+    f"{APP_VERSION} • Inteligência de mercado • "
     "Motor de aprendizado • Paper Trading"
 )
 
 st.divider()
 
+
 # ============================================================
-# CONTROLE
+# SELEÇÃO
 # ============================================================
 
-col1, col2 = st.columns(2)
+asset = st.selectbox(
+    "Criptomoeda",
+    list(COINS.keys())
+)
 
-with col1:
+symbol = COINS[asset]
 
-    coin_name = st.selectbox(
-        "Criptomoeda",
-        list(COINS.keys())
-    )
-
-with col2:
-
-    interval = st.selectbox(
-        "Período",
-        ["15m", "1h", "4h", "1d"],
-        index=1
-    )
-
-symbol = COINS[coin_name]
-
-analyze_button = st.button(
+analyze = st.button(
     "🔄 ANALISAR MERCADO",
     use_container_width=True
 )
+
 
 # ============================================================
 # ANÁLISE
 # ============================================================
 
-if analyze_button:
+if analyze:
 
-    try:
+    with st.spinner("Analisando mercado..."):
 
-        with st.spinner(
-            "Buscando dados e analisando o mercado..."
-        ):
+        try:
 
-            df = get_market_data(
-                symbol,
-                interval,
-                300
+            df = get_market_data(symbol)
+
+            df = add_indicators(df)
+
+            # Avalia previsões antigas antes de gerar a nova
+            evaluate_predictions(
+                asset,
+                df
             )
 
-            df = calculate_indicators(df)
+            signal, confidence, explanations, scores = (
+                calculate_signal(
+                    df,
+                    asset
+                )
+            )
 
-            result = analyze_market(df)
+            row = df.iloc[-1]
 
-            st.session_state.last_df = df
-            st.session_state.last_result = result
+            price = float(row["close"])
 
-        st.success(
-            "✅ Mercado analisado com sucesso."
-        )
+            timestamp = row["datetime"]
 
-    except Exception as e:
+            register_prediction(
+                asset,
+                signal,
+                confidence,
+                price,
+                timestamp.isoformat()
+            )
 
-        st.error(
-            "Não foi possível analisar o mercado."
-        )
+            st.session_state.analysis = {
+                "asset": asset,
+                "symbol": symbol,
+                "df": df,
+                "signal": signal,
+                "confidence": confidence,
+                "explanations": explanations,
+                "scores": scores,
+                "price": price,
+                "timestamp": timestamp
+            }
 
-        st.info(
-            "Verifique sua conexão com a internet "
-            "e tente novamente."
-        )
+            st.success(
+                "✅ Mercado analisado com sucesso."
+            )
+
+        except Exception as e:
+
+            st.error(
+                "❌ Não foi possível atualizar o mercado."
+            )
+
+            st.caption(
+                "Verifique sua conexão com a internet e "
+                "tente novamente."
+            )
 
 
 # ============================================================
-# RESULTADO
+# RESULTADO DA ANÁLISE
 # ============================================================
 
-if "last_result" in st.session_state:
+if "analysis" in st.session_state:
 
-    result = st.session_state.last_result
-    df = st.session_state.last_df
+    analysis = st.session_state.analysis
+
+    df = analysis["df"]
+
+    signal = analysis["signal"]
+    confidence = analysis["confidence"]
+    price = analysis["price"]
+
+    state = get_asset_state(
+        analysis["asset"]
+    )
 
     st.divider()
 
     st.header("🤖 Sinal do Trader")
 
-    signal = result["signal"]
-
     if signal == "BUY":
-
-        st.success(
-            "🟢 BUY — POSSÍVEL COMPRA"
-        )
+        st.success("🟢 COMPRAR")
 
     elif signal == "SELL":
+        st.error("🔴 VENDER")
 
-        st.error(
-            "🔴 SELL — POSSÍVEL VENDA"
+    else:
+        st.warning("🟡 HOLD")
+
+    st.metric(
+        "Confiança",
+        f"{confidence}%"
+    )
+
+    accuracy = get_accuracy(
+        analysis["asset"]
+    )
+
+    if accuracy is not None:
+
+        st.metric(
+            "Taxa histórica de acerto",
+            f"{accuracy:.1f}%"
         )
 
     else:
 
-        st.warning(
-            "🟡 HOLD — AGUARDAR"
+        st.info(
+            "💡 A IA ainda está acumulando histórico "
+            "para aprender."
         )
+
+    st.divider()
+
+    # ========================================================
+    # MERCADO
+    # ========================================================
+
+    st.header("💰 Mercado")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-
         st.metric(
-            "Confiança",
-            f'{result["confidence"]}%'
+            "Preço atual",
+            f"${price:,.2f}"
         )
 
     with col2:
-
         st.metric(
-            "Score",
-            f'{result["percentage"]:.1f}'
+            "RSI",
+            f"{df.iloc[-1]['rsi']:.2f}"
         )
 
     with col3:
-
-        current_price = df.iloc[-1]["close"]
-
-        st.metric(
-            "Preço atual",
-            f"${current_price:,.2f}"
-        )
-
-    st.info(
-        "💡 " +
-        " ".join(result["reasons"])
-    )
-
-    # ========================================================
-    # INDICADORES
-    # ========================================================
-
-    st.divider()
-
-    st.header("📊 Indicadores")
-
-    latest = df.iloc[-1]
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    with c1:
-        st.metric(
-            "SMA 5",
-            f"${latest['sma5']:,.2f}"
-        )
-
-    with c2:
-        st.metric(
-            "SMA 20",
-            f"${latest['sma20']:,.2f}"
-        )
-
-    with c3:
-        st.metric(
-            "RSI",
-            f"{latest['rsi']:.1f}"
-        )
-
-    with c4:
         st.metric(
             "Momentum",
-            f"{latest['momentum']:.2f}%"
+            f"{df.iloc[-1]['momentum']:.2f}%"
         )
+
+    st.subheader("📊 Indicadores")
+
+    indicator_data = pd.DataFrame({
+        "Indicador": [
+            "Média 5",
+            "Média 20",
+            "Média 50",
+            "RSI",
+            "MACD",
+            "Momentum",
+            "Volatilidade"
+        ],
+        "Valor": [
+            df.iloc[-1]["ema5"],
+            df.iloc[-1]["ema20"],
+            df.iloc[-1]["ema50"],
+            df.iloc[-1]["rsi"],
+            df.iloc[-1]["macd"],
+            df.iloc[-1]["momentum"],
+            df.iloc[-1]["volatility"]
+        ]
+    })
+
+    st.dataframe(
+        indicator_data,
+        use_container_width=True,
+        hide_index=True
+    )
 
     # ========================================================
     # GRÁFICO
     # ========================================================
 
-    st.divider()
+    st.subheader("📈 Histórico de preço")
 
-    st.header("📈 Gráfico")
+    chart_df = df[
+        ["datetime", "close"]
+    ].tail(100).copy()
 
-    chart_data = df.set_index("timestamp")[
-        ["close", "sma5", "sma20", "ema9", "ema21"]
-    ]
+    chart_df = chart_df.set_index(
+        "datetime"
+    )
 
     st.line_chart(
-        chart_data,
-        use_container_width=True
+        chart_df["close"]
     )
 
+    # ========================================================
+    # EXPLICAÇÃO
+    # ========================================================
 
-# ============================================================
-# PAPER TRADING
-# ============================================================
+    st.subheader("🧠 Por que a IA tomou essa decisão?")
 
-st.divider()
+    if analysis["explanations"]:
 
-st.header("💰 Paper Trading")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-
-    st.metric(
-        "Saldo disponível",
-        f"US$ {st.session_state.balance:,.2f}"
-    )
-
-with col2:
-
-    if st.session_state.position:
-
-        st.metric(
-            "Posição",
-            st.session_state.position
-        )
-
-    else:
-
-        st.metric(
-            "Posição",
-            "Nenhuma"
-        )
-
-with col3:
-
-    if st.session_state.position:
-
-        entry = st.session_state.entry_price
-
-        if "last_df" in st.session_state:
-
-            current = st.session_state.last_df.iloc[-1]["close"]
-
-            if st.session_state.position == "BUY":
-
-                pnl = (
-                    (current - entry) /
-                    entry
-                ) * 100
-
-            else:
-
-                pnl = (
-                    (entry - current) /
-                    entry
-                ) * 100
-
-            st.metric(
-                "Resultado atual",
-                f"{pnl:.2f}%"
+        for explanation in analysis["explanations"]:
+            st.write(
+                f"• {explanation}"
             )
 
     else:
 
-        st.metric(
-            "Resultado atual",
-            "0.00%"
+        st.write(
+            "• Os indicadores não apresentaram "
+            "uma confirmação forte."
         )
 
+    st.write(
+        f"Pontuação de compra: "
+        f"{analysis['scores']['BUY']:.2f}"
+    )
 
-col1, col2 = st.columns(2)
-
-with col1:
-
-    if st.button(
-        "🟢 ABRIR OPERAÇÃO",
-        use_container_width=True
-    ):
-
-        if "last_result" not in st.session_state:
-
-            st.warning(
-                "Faça uma análise primeiro."
-            )
-
-        elif st.session_state.position is not None:
-
-            st.warning(
-                "Já existe uma operação aberta."
-            )
-
-        else:
-
-            current = st.session_state.last_df.iloc[-1]["close"]
-            signal = st.session_state.last_result["signal"]
-
-            if signal == "HOLD":
-
-                st.warning(
-                    "O sinal atual é HOLD. "
-                    "O sistema recomenda aguardar."
-                )
-
-            else:
-
-                open_position(
-                    current,
-                    signal
-                )
-
-                st.success(
-                    f"Operação {signal} aberta em "
-                    f"${current:,.2f}"
-                )
-
-with col2:
-
-    if st.button(
-        "🔴 FECHAR OPERAÇÃO",
-        use_container_width=True
-    ):
-
-        if st.session_state.position is None:
-
-            st.warning(
-                "Não existe operação aberta."
-            )
-
-        elif "last_df" not in st.session_state:
-
-            st.warning(
-                "Faça uma nova análise primeiro."
-            )
-
-        else:
-
-            current = st.session_state.last_df.iloc[-1]["close"]
-
-            trade = close_position(current)
-
-            if trade:
-
-                if trade["resultado"] == "WIN":
-
-                    st.success(
-                        f"✅ Operação encerrada com lucro de "
-                        f"US$ {trade['lucro']:.2f}"
-                    )
-
-                else:
-
-                    st.error(
-                        f"❌ Operação encerrada com prejuízo de "
-                        f"US$ {trade['lucro']:.2f}"
-                    )
+    st.write(
+        f"Pontuação de venda: "
+        f"{analysis['scores']['SELL']:.2f}"
+    )
 
 
 # ============================================================
@@ -855,70 +948,363 @@ st.divider()
 
 st.header("🧠 Motor de Aprendizado")
 
-accuracy = learning_accuracy()
+current_state = get_asset_state(asset)
 
-col1, col2, col3, col4 = st.columns(4)
+total_asset_predictions = (
+    current_state["correct"] +
+    current_state["wrong"]
+)
 
-with col1:
+learning_col1, learning_col2, learning_col3 = st.columns(3)
 
-    st.metric(
-        "Análises",
-        learning["total_analyses"]
-    )
-
-with col2:
+with learning_col1:
 
     st.metric(
-        "Operações vencedoras",
-        learning["wins"]
+        "Previsões avaliadas",
+        total_asset_predictions
     )
 
-with col3:
+with learning_col2:
 
     st.metric(
-        "Operações perdedoras",
-        learning["losses"]
+        "Acertos",
+        current_state["correct"]
     )
 
-with col4:
+with learning_col3:
 
     st.metric(
-        "Taxa de acerto",
-        f"{accuracy}%"
+        "Erros",
+        current_state["wrong"]
     )
+
+
+asset_accuracy = get_accuracy(asset)
+
+if asset_accuracy is not None:
+
+    st.progress(
+        min(asset_accuracy / 100, 1.0)
+    )
+
+    st.write(
+        f"Desempenho de {asset}: "
+        f"**{asset_accuracy:.2f}% de acerto**"
+    )
+
+else:
+
+    st.info(
+        "A IA ainda não possui previsões suficientes "
+        "para medir o desempenho."
+    )
+
+
+st.subheader("⚙️ Pesos que a IA está aprendendo")
+
+weights_df = pd.DataFrame({
+    "Indicador": list(
+        current_state["weights"].keys()
+    ),
+    "Peso": list(
+        current_state["weights"].values()
+    )
+})
+
+st.dataframe(
+    weights_df,
+    use_container_width=True,
+    hide_index=True
+)
 
 st.caption(
-    "O motor ajusta gradualmente os pesos dos indicadores "
-    "com base nos resultados das operações simuladas."
+    "Os pesos aumentam ou diminuem gradualmente "
+    "conforme o histórico de acertos e erros."
 )
+
+
+# ============================================================
+# PAPER TRADING
+# ============================================================
+
+st.divider()
+
+st.header("💰 Paper Trading")
+
+paper = st.session_state.paper
+
+total_pnl = sum(
+    trade["pnl"]
+    for trade in paper["trades"]
+)
+
+portfolio_value = paper["balance"]
+
+if paper["position"] is not None:
+
+    position = paper["position"]
+
+    if (
+        "analysis" in st.session_state
+        and position["asset"] ==
+        st.session_state.analysis["asset"]
+    ):
+
+        current_price = (
+            st.session_state.analysis["price"]
+        )
+
+        if position["signal"] == "BUY":
+
+            unrealized = (
+                current_price -
+                position["entry_price"]
+            ) * position["quantity"]
+
+        else:
+
+            unrealized = (
+                position["entry_price"] -
+                current_price
+            ) * position["quantity"]
+
+        portfolio_value += (
+            position["amount"] +
+            unrealized
+        )
+
+else:
+
+    unrealized = 0.0
+
+
+paper_col1, paper_col2, paper_col3 = st.columns(3)
+
+with paper_col1:
+
+    st.metric(
+        "Saldo disponível",
+        f"US$ {paper['balance']:,.2f}"
+    )
+
+with paper_col2:
+
+    st.metric(
+        "P&L realizado",
+        f"US$ {total_pnl:,.2f}"
+    )
+
+with paper_col3:
+
+    st.metric(
+        "Operações",
+        len(paper["trades"])
+    )
+
+
+# ============================================================
+# OPERAÇÃO SIMULADA
+# ============================================================
+
+if "analysis" in st.session_state:
+
+    analysis = st.session_state.analysis
+
+    st.subheader("🎯 Operação simulada")
+
+    amount = st.number_input(
+        "Valor da operação (US$)",
+        min_value=10.0,
+        max_value=paper["balance"]
+        if paper["balance"] >= 10
+        else 10.0,
+        value=min(
+            1000.0,
+            paper["balance"]
+        ) if paper["balance"] >= 10 else 10.0,
+        step=10.0
+    )
+
+    trade_col1, trade_col2 = st.columns(2)
+
+    with trade_col1:
+
+        if st.button(
+            "🚀 Abrir operação pelo sinal da IA",
+            use_container_width=True
+        ):
+
+            success, message = open_paper_trade(
+                analysis["asset"],
+                analysis["signal"],
+                analysis["price"],
+                analysis["confidence"],
+                amount
+            )
+
+            if success:
+                st.success(message)
+            else:
+                st.warning(message)
+
+    with trade_col2:
+
+        if st.button(
+            "🔒 Encerrar posição",
+            use_container_width=True
+        ):
+
+            success, pnl, message = (
+                close_paper_trade(
+                    analysis["price"]
+                )
+            )
+
+            if success:
+
+                if pnl >= 0:
+                    st.success(
+                        f"{message} "
+                        f"Lucro: US$ {pnl:,.2f}"
+                    )
+                else:
+                    st.error(
+                        f"{message} "
+                        f"Resultado: US$ {pnl:,.2f}"
+                    )
+
+            else:
+
+                st.warning(message)
+
+
+# ============================================================
+# POSIÇÃO ATUAL
+# ============================================================
+
+if paper["position"] is not None:
+
+    st.subheader("📌 Posição aberta")
+
+    position = paper["position"]
+
+    position_df = pd.DataFrame([
+        {
+            "Cripto": position["asset"],
+            "Direção": position["signal"],
+            "Preço entrada": position["entry_price"],
+            "Quantidade": position["quantity"],
+            "Valor": position["amount"],
+            "Confiança": f"{position['confidence']:.0f}%"
+        }
+    ])
+
+    st.dataframe(
+        position_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
 
 # ============================================================
 # HISTÓRICO
 # ============================================================
 
-if st.session_state.trade_history:
+if paper["trades"]:
 
-    st.divider()
+    st.subheader("📚 Histórico do Paper Trading")
 
-    st.header("📋 Histórico de Operações")
-
-    history_df = pd.DataFrame(
-        st.session_state.trade_history
+    history = pd.DataFrame(
+        paper["trades"]
     )
 
     st.dataframe(
-        history_df,
+        history,
         use_container_width=True,
         hide_index=True
     )
 
+
 # ============================================================
-# RODAPÉ
+# HISTÓRICO DA IA
 # ============================================================
 
 st.divider()
 
+st.header("📚 Histórico de Aprendizado")
+
+predictions = current_state["predictions"]
+
+evaluated = [
+    p for p in predictions
+    if p.get("evaluated", False)
+]
+
+if evaluated:
+
+    history_ai = pd.DataFrame(
+        evaluated[-30:]
+    )
+
+    columns_to_show = [
+        "timestamp",
+        "signal",
+        "confidence",
+        "entry_price",
+        "exit_price",
+        "result"
+    ]
+
+    available = [
+        c for c in columns_to_show
+        if c in history_ai.columns
+    ]
+
+    st.dataframe(
+        history_ai[available],
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info(
+        "Ainda não existem previsões avaliadas. "
+        "Continue analisando o mercado para o motor "
+        "construir seu histórico."
+    )
+
+
+# ============================================================
+# CONTROLE DO APRENDIZADO
+# ============================================================
+
+st.divider()
+
+st.subheader("🔧 Controle do motor")
+
+if st.button(
+    "♻️ Resetar aprendizado desta criptomoeda",
+    use_container_width=True
+):
+
+    learning["assets"][asset] = create_asset_state()
+
+    save_learning(learning)
+
+    st.success(
+        f"Aprendizado de {asset} reiniciado."
+    )
+
+    st.rerun()
+
+
 st.caption(
-    "⚠️ Sistema experimental de Paper Trading. "
-    "Nenhuma ordem real é enviada para uma corretora."
+    "⚠️ Este aplicativo é experimental e utiliza "
+    "Paper Trading. Os sinais não são garantia de lucro "
+    "e não devem ser tratados como recomendação financeira."
+)
+
+st.caption(
+    f"Crypto AI Trader {APP_VERSION}"
 )
