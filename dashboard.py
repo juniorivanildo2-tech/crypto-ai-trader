@@ -1,15 +1,16 @@
 import streamlit as st
 import requests
-import json
-import os
+import pandas as pd
+import math
 from datetime import datetime
+
 
 # =========================================================
 # CONFIGURAÇÃO
 # =========================================================
 
 st.set_page_config(
-    page_title="Crypto AI Trader",
+    page_title="Crypto AI Trader V3",
     page_icon="🤖",
     layout="centered"
 )
@@ -24,365 +25,606 @@ COINS = {
     "Dogecoin": "dogecoin"
 }
 
-LEARNING_FILE = "learning_data.json"
+
+# =========================================================
+# ESTADO DO PAPER TRADING
+# =========================================================
+
+if "saldo" not in st.session_state:
+    st.session_state.saldo = 10000.0
+
+if "moedas" not in st.session_state:
+    st.session_state.moedas = 0.0
+
+if "preco_entrada" not in st.session_state:
+    st.session_state.preco_entrada = 0.0
+
+if "valor_entrada" not in st.session_state:
+    st.session_state.valor_entrada = 0.0
+
+if "operacao_aberta" not in st.session_state:
+    st.session_state.operacao_aberta = False
+
+if "historico" not in st.session_state:
+    st.session_state.historico = []
+
+if "acertos" not in st.session_state:
+    st.session_state.acertos = 0
+
+if "erros" not in st.session_state:
+    st.session_state.erros = 0
+
+if "analise" not in st.session_state:
+    st.session_state.analise = None
+
+if "precos" not in st.session_state:
+    st.session_state.precos = None
 
 
 # =========================================================
-# MOTOR DE MERCADO
+# FUNÇÃO PARA PEGAR DADOS
 # =========================================================
 
-def get_market_data(crypto_id):
+def buscar_mercado(coin_id):
 
     url = (
-        "https://api.coingecko.com/api/v3/coins/markets"
-        f"?vs_currency=usd&ids={crypto_id}"
-        "&price_change_percentage=1h,24h,7d"
-    )
-
-    response = requests.get(
-        url,
-        timeout=15,
-        headers={"accept": "application/json"}
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if not data:
-        raise Exception("Nenhum dado recebido do mercado.")
-
-    return data[0]
-
-
-# =========================================================
-# HISTÓRICO SIMPLIFICADO
-# =========================================================
-
-def get_history(crypto_id):
-
-    url = (
-        f"https://api.coingecko.com/api/v3/coins/"
-        f"{crypto_id}/market_chart"
+        "https://api.coingecko.com/api/v3/coins/"
+        f"{coin_id}/market_chart"
         "?vs_currency=usd&days=7&interval=hourly"
     )
 
-    response = requests.get(
+    resposta = requests.get(
         url,
-        timeout=15,
-        headers={"accept": "application/json"}
+        timeout=20,
+        headers={
+            "accept": "application/json",
+            "user-agent": "CryptoAITrader/3.0"
+        }
     )
 
-    response.raise_for_status()
+    resposta.raise_for_status()
 
-    data = response.json()
+    dados = resposta.json()
 
-    prices = [
-        item[1]
-        for item in data.get("prices", [])
-    ]
+    precos = dados.get("prices", [])
+    volumes = dados.get("total_volumes", [])
 
-    if len(prices) < 20:
-        raise Exception("Histórico insuficiente para análise.")
+    if len(precos) < 30:
+        raise Exception(
+            "O mercado retornou poucos dados."
+        )
 
-    return prices
+    df = pd.DataFrame(
+        precos,
+        columns=["timestamp", "price"]
+    )
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        unit="ms"
+    )
+
+    if volumes:
+
+        volume_df = pd.DataFrame(
+            volumes,
+            columns=["timestamp", "volume"]
+        )
+
+        volume_df["timestamp"] = pd.to_datetime(
+            volume_df["timestamp"],
+            unit="ms"
+        )
+
+        df = pd.merge_asof(
+            df.sort_values("timestamp"),
+            volume_df.sort_values("timestamp"),
+            on="timestamp"
+        )
+
+    else:
+
+        df["volume"] = 0.0
+
+    return df
 
 
 # =========================================================
-# MÉDIA
+# RSI
 # =========================================================
 
-def moving_average(values, period):
+def calcular_rsi(series, periodo=14):
 
-    if len(values) < period:
-        return None
+    delta = series.diff()
 
-    return sum(values[-period:]) / period
+    ganhos = delta.clip(lower=0)
+    perdas = -delta.clip(upper=0)
+
+    media_ganho = ganhos.rolling(
+        periodo
+    ).mean()
+
+    media_perda = perdas.rolling(
+        periodo
+    ).mean()
+
+    rs = media_ganho / media_perda.replace(
+        0,
+        float("nan")
+    )
+
+    rsi = 100 - (
+        100 / (1 + rs)
+    )
+
+    return rsi.fillna(50)
+
+
+# =========================================================
+# EMA
+# =========================================================
+
+def calcular_ema(series, periodo):
+
+    return series.ewm(
+        span=periodo,
+        adjust=False
+    ).mean()
+
+
+# =========================================================
+# MACD
+# =========================================================
+
+def calcular_macd(series):
+
+    ema12 = calcular_ema(
+        series,
+        12
+    )
+
+    ema26 = calcular_ema(
+        series,
+        26
+    )
+
+    macd = ema12 - ema26
+
+    sinal = calcular_ema(
+        macd,
+        9
+    )
+
+    histograma = macd - sinal
+
+    return macd, sinal, histograma
 
 
 # =========================================================
 # MOMENTUM
 # =========================================================
 
-def calculate_momentum(prices):
+def calcular_momentum(series, periodo=6):
 
-    if len(prices) < 6:
-        return 0
+    if len(series) <= periodo:
+        return 0.0
 
-    old_price = prices[-6]
-    current_price = prices[-1]
-
-    if old_price == 0:
-        return 0
-
-    return ((current_price - old_price) / old_price) * 100
-
-
-# =========================================================
-# MOTOR DE APRENDIZADO
-# =========================================================
-
-def load_learning():
-
-    if not os.path.exists(LEARNING_FILE):
-        return {
-            "compra": 0,
-            "venda": 0,
-            "hold": 0,
-            "acertos": 0,
-            "erros": 0
-        }
-
-    try:
-
-        with open(LEARNING_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        return data
-
-    except Exception:
-
-        return {
-            "compra": 0,
-            "venda": 0,
-            "hold": 0,
-            "acertos": 0,
-            "erros": 0
-        }
-
-
-def save_learning(data):
-
-    try:
-
-        with open(
-            LEARNING_FILE,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                data,
-                file,
-                indent=2,
-                ensure_ascii=False
-            )
-
-    except Exception:
-        pass
-
-
-def learning_adjustment(signal, learning):
-
-    total = (
-        learning["compra"]
-        + learning["venda"]
-        + learning["hold"]
+    antigo = float(
+        series.iloc[-periodo]
     )
 
-    if total == 0:
-        return 0
+    atual = float(
+        series.iloc[-1]
+    )
 
-    if signal == "COMPRA":
-        value = learning["compra"]
+    if antigo == 0:
+        return 0.0
 
-    elif signal == "VENDA":
-        value = learning["venda"]
-
-    else:
-        value = learning["hold"]
-
-    return value / total
+    return (
+        (atual - antigo)
+        / antigo
+    ) * 100
 
 
 # =========================================================
 # ANÁLISE
 # =========================================================
 
-def analyze_market(market, prices, learning):
+def analisar(df):
 
-    current_price = market["current_price"]
+    prices = df["price"]
 
-    change_1h = market.get(
-        "price_change_percentage_1h_in_currency",
-        0
-    ) or 0
+    atual = float(
+        prices.iloc[-1]
+    )
 
-    change_24h = market.get(
-        "price_change_percentage_24h",
-        0
-    ) or 0
+    media5 = float(
+        prices.rolling(5).mean().iloc[-1]
+    )
 
-    change_7d = market.get(
-        "price_change_percentage_7d_in_currency",
-        0
-    ) or 0
+    media20 = float(
+        prices.rolling(20).mean().iloc[-1]
+    )
 
-    media_5 = moving_average(prices, 5)
-    media_20 = moving_average(prices, 20)
+    rsi = float(
+        calcular_rsi(prices).iloc[-1]
+    )
 
-    momentum = calculate_momentum(prices)
+    macd, macd_sinal, histograma = (
+        calcular_macd(prices)
+    )
+
+    macd_atual = float(
+        macd.iloc[-1]
+    )
+
+    macd_sinal_atual = float(
+        macd_sinal.iloc[-1]
+    )
+
+    hist_atual = float(
+        histograma.iloc[-1]
+    )
+
+    momentum = calcular_momentum(
+        prices
+    )
+
+    if len(prices) >= 2:
+
+        variacao_1h = (
+            (
+                prices.iloc[-1]
+                - prices.iloc[-2]
+            )
+            / prices.iloc[-2]
+        ) * 100
+
+    else:
+
+        variacao_1h = 0
+
+    if len(prices) >= 25:
+
+        variacao_24h = (
+            (
+                prices.iloc[-1]
+                - prices.iloc[-25]
+            )
+            / prices.iloc[-25]
+        ) * 100
+
+    else:
+
+        variacao_24h = 0
+
+    if len(prices) >= 169:
+
+        variacao_7d = (
+            (
+                prices.iloc[-1]
+                - prices.iloc[-169]
+            )
+            / prices.iloc[-169]
+        ) * 100
+
+    else:
+
+        variacao_7d = 0
+
+
+    # =====================================================
+    # VOLUME
+    # =====================================================
+
+    volume_atual = float(
+        df["volume"].iloc[-1]
+    )
+
+    volume_medio = float(
+        df["volume"]
+        .rolling(20)
+        .mean()
+        .iloc[-1]
+    )
+
+    if volume_medio > 0:
+
+        volume_ratio = (
+            volume_atual
+            / volume_medio
+        )
+
+    else:
+
+        volume_ratio = 1.0
+
+
+    # =====================================================
+    # SCORE
+    # =====================================================
 
     score = 0
 
-    # -----------------------------
+    motivos_compra = []
+    motivos_venda = []
+
+
     # MÉDIAS
-    # -----------------------------
 
-    if media_5 > media_20:
+    if media5 > media20:
+
         score += 2
 
-    elif media_5 < media_20:
-        score -= 2
-
-    # -----------------------------
-    # MOMENTUM
-    # -----------------------------
-
-    if momentum > 0.20:
-        score += 2
-
-    elif momentum < -0.20:
-        score -= 2
-
-    # -----------------------------
-    # 1 HORA
-    # -----------------------------
-
-    if change_1h > 0:
-        score += 1
-
-    elif change_1h < 0:
-        score -= 1
-
-    # -----------------------------
-    # 24 HORAS
-    # -----------------------------
-
-    if change_24h > 1:
-        score += 1
-
-    elif change_24h < -1:
-        score -= 1
-
-    # -----------------------------
-    # 7 DIAS
-    # -----------------------------
-
-    if change_7d > 2:
-        score += 1
-
-    elif change_7d < -2:
-        score -= 1
-
-    # -----------------------------
-    # DECISÃO
-    # -----------------------------
-
-    if score >= 4:
-        signal = "COMPRA"
-
-    elif score <= -4:
-        signal = "VENDA"
+        motivos_compra.append(
+            "Média curta acima da média longa"
+        )
 
     else:
-        signal = "HOLD"
 
-    # -----------------------------
-    # APRENDIZADO
-    # -----------------------------
+        score -= 2
 
-    adjustment = learning_adjustment(
-        signal,
-        learning
+        motivos_venda.append(
+            "Média curta abaixo da média longa"
+        )
+
+
+    # RSI
+
+    if 50 <= rsi <= 70:
+
+        score += 1
+
+        motivos_compra.append(
+            "RSI favorece força compradora"
+        )
+
+    elif rsi < 30:
+
+        score += 1
+
+        motivos_compra.append(
+            "RSI indica região de sobrevenda"
+        )
+
+    elif rsi > 70:
+
+        score -= 1
+
+        motivos_venda.append(
+            "RSI indica região de sobrecompra"
+        )
+
+    elif rsi < 50:
+
+        score -= 1
+
+        motivos_venda.append(
+            "RSI abaixo de 50"
+        )
+
+
+    # MACD
+
+    if macd_atual > macd_sinal_atual:
+
+        score += 2
+
+        motivos_compra.append(
+            "MACD acima da linha de sinal"
+        )
+
+    else:
+
+        score -= 2
+
+        motivos_venda.append(
+            "MACD abaixo da linha de sinal"
+        )
+
+
+    # HISTOGRAMA MACD
+
+    if hist_atual > 0:
+
+        score += 1
+
+    else:
+
+        score -= 1
+
+
+    # MOMENTUM
+
+    if momentum > 0.20:
+
+        score += 1
+
+        motivos_compra.append(
+            "Momentum positivo"
+        )
+
+    elif momentum < -0.20:
+
+        score -= 1
+
+        motivos_venda.append(
+            "Momentum negativo"
+        )
+
+
+    # VARIAÇÃO 24H
+
+    if variacao_24h > 1:
+
+        score += 1
+
+    elif variacao_24h < -1:
+
+        score -= 1
+
+
+    # VOLUME
+
+    if volume_ratio > 1.2:
+
+        if score > 0:
+
+            score += 1
+
+            motivos_compra.append(
+                "Volume acima da média"
+            )
+
+        elif score < 0:
+
+            score -= 1
+
+            motivos_venda.append(
+                "Volume reforça movimento vendedor"
+            )
+
+
+    # =====================================================
+    # SINAL
+    # =====================================================
+
+    if score >= 5:
+
+        sinal = "COMPRA"
+
+    elif score <= -5:
+
+        sinal = "VENDA"
+
+    else:
+
+        sinal = "HOLD"
+
+
+    # =====================================================
+    # CONFIANÇA
+    # =====================================================
+
+    confianca = 50 + (
+        abs(score) * 5
     )
 
-    confidence = min(
+    confianca = min(
         95,
         max(
             50,
-            50 + abs(score) * 8
+            confianca
         )
     )
 
-    # pequena influência do histórico
-    if adjustment > 0.50:
-        confidence += 3
 
-    confidence = min(confidence, 95)
+    # =====================================================
+    # MOTIVO
+    # =====================================================
 
-    # -----------------------------
-    # EXPLICAÇÃO
-    # -----------------------------
+    if sinal == "COMPRA":
 
-    if signal == "COMPRA":
+        if motivos_compra:
 
-        reason = (
-            "O conjunto de indicadores apresenta "
-            "predominância positiva. "
-            "As médias, momentum e variações recentes "
-            "favorecem uma possível alta."
-        )
+            motivo = " • ".join(
+                motivos_compra[:4]
+            )
 
-    elif signal == "VENDA":
+        else:
 
-        reason = (
-            "O conjunto de indicadores apresenta "
-            "predominância negativa. "
-            "As médias, momentum e variações recentes "
-            "favorecem uma possível baixa."
-        )
+            motivo = (
+                "Predominância dos indicadores "
+                "positivos."
+            )
+
+    elif sinal == "VENDA":
+
+        if motivos_venda:
+
+            motivo = " • ".join(
+                motivos_venda[:4]
+            )
+
+        else:
+
+            motivo = (
+                "Predominância dos indicadores "
+                "negativos."
+            )
 
     else:
 
-        reason = (
-            "Os indicadores estão misturados ou sem "
-            "força suficiente para confirmar uma direção. "
-            "O sistema prefere aguardar."
+        motivo = (
+            "Os indicadores estão divididos. "
+            "O sistema prefere aguardar uma "
+            "confirmação mais forte."
         )
 
+
     return {
-        "signal": signal,
-        "score": score,
-        "confidence": confidence,
-        "reason": reason,
-        "price": current_price,
-        "media_5": media_5,
-        "media_20": media_20,
+
+        "preco": atual,
+
+        "media5": media5,
+
+        "media20": media20,
+
+        "rsi": rsi,
+
+        "macd": macd_atual,
+
+        "macd_sinal": macd_sinal_atual,
+
+        "histograma": hist_atual,
+
         "momentum": momentum,
-        "change_1h": change_1h,
-        "change_24h": change_24h,
-        "change_7d": change_7d
+
+        "variacao_1h": variacao_1h,
+
+        "variacao_24h": variacao_24h,
+
+        "variacao_7d": variacao_7d,
+
+        "volume_ratio": volume_ratio,
+
+        "score": score,
+
+        "sinal": sinal,
+
+        "confianca": confianca,
+
+        "motivo": motivo
     }
 
 
 # =========================================================
-# INTERFACE
+# TOPO
 # =========================================================
 
 st.title("🤖 Crypto AI Trader")
 
 st.caption(
-    "Paper Trading • Análise automática • Motor adaptativo"
+    "V3 • Inteligência de mercado • Paper Trading"
 )
 
 st.divider()
 
 
 # =========================================================
-# ESCOLHA DA CRIPTO
+# ESCOLHA
 # =========================================================
 
-crypto_name = st.selectbox(
+crypto_nome = st.selectbox(
     "Criptomoeda",
     list(COINS.keys())
 )
 
-crypto_id = COINS[crypto_name]
+crypto_id = COINS[crypto_nome]
 
 
 # =========================================================
-# BOTÃO DE ANÁLISE
+# ANALISAR
 # =========================================================
 
 if st.button(
@@ -393,36 +635,37 @@ if st.button(
     try:
 
         with st.spinner(
-            "Consultando o mercado..."
+            "Buscando dados do mercado..."
         ):
 
-            market = get_market_data(
+            df = buscar_mercado(
                 crypto_id
             )
 
-            prices = get_history(
-                crypto_id
+            resultado = analisar(
+                df
             )
 
-            learning = load_learning()
+            st.session_state.analise = resultado
 
-            result = analyze_market(
-                market,
-                prices,
-                learning
+            st.session_state.precos = df
+
+            st.session_state.crypto = (
+                crypto_nome
             )
 
-            st.session_state["result"] = result
-            st.session_state["crypto"] = crypto_name
+        st.success(
+            "✅ Mercado analisado com sucesso."
+        )
 
-    except Exception as e:
+    except Exception as erro:
 
         st.error(
-            "❌ Não foi possível realizar a análise."
+            "❌ Não foi possível analisar o mercado."
         )
 
         st.warning(
-            f"Detalhes: {e}"
+            f"Detalhes: {erro}"
         )
 
 
@@ -430,80 +673,136 @@ if st.button(
 # RESULTADO
 # =========================================================
 
-if "result" in st.session_state:
+if st.session_state.analise:
 
-    result = st.session_state["result"]
+    resultado = (
+        st.session_state.analise
+    )
 
     st.divider()
 
     st.header("🤖 Sinal do Trader")
 
-    signal = result["signal"]
+    sinal = resultado["sinal"]
 
-    st.subheader("Sinal atual")
+    if sinal == "COMPRA":
 
-    if signal == "COMPRA":
+        st.success(
+            "🟢 COMPRA"
+        )
 
-        st.success("🟢 COMPRA")
+    elif sinal == "VENDA":
 
-    elif signal == "VENDA":
-
-        st.error("🔴 VENDA")
+        st.error(
+            "🔴 VENDA"
+        )
 
     else:
 
-        st.warning("🟡 HOLD")
+        st.warning(
+            "🟡 HOLD"
+        )
 
     st.metric(
         "Confiança",
-        f'{result["confidence"]:.0f}%'
+        f'{resultado["confianca"]:.0f}%'
     )
 
     st.info(
-        f'💡 {result["reason"]}'
+        f'💡 {resultado["motivo"]}'
     )
+
+
+    # =====================================================
+    # PREÇO
+    # =====================================================
 
     st.divider()
 
+    st.header("💰 Mercado")
+
+    st.metric(
+        "Preço atual",
+        f'${resultado["preco"]:,.2f}'
+    )
+
+
     # =====================================================
-    # DADOS DO MERCADO
+    # INDICADORES
     # =====================================================
 
-    st.header("📊 Dados do Mercado")
+    st.header("📊 Indicadores")
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    with col1:
-
-        st.metric(
-            "Preço atual",
-            f'${result["price"]:,.2f}'
-        )
-
-    with col2:
-
-        st.metric(
-            "Momentum",
-            f'{result["momentum"]:.2f}%'
-        )
-
-    col3, col4 = st.columns(2)
-
-    with col3:
+    with c1:
 
         st.metric(
             "Média 5",
-            f'${result["media_5"]:,.2f}'
+            f'${resultado["media5"]:,.2f}'
         )
 
-    with col4:
+        st.metric(
+            "RSI",
+            f'{resultado["rsi"]:.1f}'
+        )
+
+        st.metric(
+            "Momentum",
+            f'{resultado["momentum"]:.2f}%'
+        )
+
+    with c2:
 
         st.metric(
             "Média 20",
-            f'${result["media_20"]:,.2f}'
+            f'${resultado["media20"]:,.2f}'
         )
 
-    st.divider()
+        st.metric(
+            "MACD",
+            f'{resultado["macd"]:.4f}'
+        )
+
+        st.metric(
+            "Volume",
+            f'{resultado["volume_ratio"]:.2f}x'
+        )
+
+
+    # =====================================================
+    # SCORE
+    # =====================================================
+
+    st.header("🧠 Score do Motor")
+
+    score = resultado["score"]
+
+    st.metric(
+        "Pontuação",
+        score
+    )
+
+    progresso = (
+        score + 10
+    ) / 20
+
+    progresso = min(
+        1.0,
+        max(
+            0.0,
+            progresso
+        )
+    )
+
+    st.progress(
+        progresso
+    )
+
+
+    # =====================================================
+    # VARIAÇÕES
+    # =====================================================
 
     st.header("📈 Variações")
 
@@ -512,163 +811,358 @@ if "result" in st.session_state:
     with c1:
 
         st.metric(
-            "1 hora",
-            f'{result["change_1h"]:.2f}%'
+            "1h",
+            f'{resultado["variacao_1h"]:.2f}%'
         )
 
     with c2:
 
         st.metric(
-            "24 horas",
-            f'{result["change_24h"]:.2f}%'
+            "24h",
+            f'{resultado["variacao_24h"]:.2f}%'
         )
 
     with c3:
 
         st.metric(
-            "7 dias",
-            f'{result["change_7d"]:.2f}%'
+            "7d",
+            f'{resultado["variacao_7d"]:.2f}%'
         )
 
-    st.divider()
 
     # =====================================================
-    # SCORE
+    # GRÁFICO
     # =====================================================
 
-    st.header("🧠 Motor de Aprendizado")
+    st.header("📉 Gráfico")
 
-    score = result["score"]
-
-    if score > 0:
-
-        st.write(
-            f"Score de mercado: **+{score}**"
-        )
-
-    elif score < 0:
-
-        st.write(
-            f"Score de mercado: **{score}**"
-        )
-
-    else:
-
-        st.write(
-            "Score de mercado: **0**"
-        )
-
-    st.progress(
-        min(
-            1.0,
-            max(
-                0.0,
-                (score + 8) / 16
-            )
-        )
+    df_grafico = (
+        st.session_state.precos
+        .copy()
     )
 
-    learning = load_learning()
+    df_grafico = (
+        df_grafico
+        .set_index("timestamp")
+    )
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        st.metric(
-            "Compras registradas",
-            learning["compra"]
-        )
-
-    with col2:
-
-        st.metric(
-            "Vendas registradas",
-            learning["venda"]
-        )
-
-    with col3:
-
-        st.metric(
-            "HOLD registrados",
-            learning["hold"]
-        )
-
-    st.caption(
-        "O motor utiliza o histórico das decisões para "
-        "ajustar gradualmente a confiança dos sinais."
+    st.line_chart(
+        df_grafico["price"]
     )
 
 
 # =========================================================
-# OPERAÇÃO SIMULADA
+# PAPER TRADING
 # =========================================================
 
 st.divider()
 
-st.header("💱 Operação Simulada")
+st.header("💰 Paper Trading")
 
-valor = st.number_input(
-    "Valor para comprar (US$)",
+st.metric(
+    "Saldo disponível",
+    f'US$ {st.session_state.saldo:,.2f}'
+)
+
+
+# =========================================================
+# COMPRA SIMULADA
+# =========================================================
+
+valor_compra = st.number_input(
+    "Valor da compra simulada (US$)",
     min_value=10.0,
-    value=1000.0,
+    max_value=st.session_state.saldo,
+    value=min(
+        1000.0,
+        st.session_state.saldo
+    ),
     step=100.0
 )
 
+
 if st.button(
-    "🟢 SIMULAR COMPRA",
+    "🟢 COMPRAR SIMULADO",
     use_container_width=True
 ):
 
-    if "result" not in st.session_state:
+    if not st.session_state.analise:
 
         st.warning(
-            "Faça uma análise do mercado primeiro."
+            "Faça uma análise primeiro."
+        )
+
+    elif st.session_state.operacao_aberta:
+
+        st.warning(
+            "Já existe uma operação aberta."
+        )
+
+    elif valor_compra > st.session_state.saldo:
+
+        st.error(
+            "Saldo insuficiente."
         )
 
     else:
 
-        result = st.session_state["result"]
+        preco = (
+            st.session_state
+            .analise["preco"]
+        )
 
-        price = result["price"]
+        quantidade = (
+            valor_compra
+            / preco
+        )
 
-        quantidade = valor / price
+        st.session_state.saldo -= (
+            valor_compra
+        )
+
+        st.session_state.moedas = (
+            quantidade
+        )
+
+        st.session_state.preco_entrada = (
+            preco
+        )
+
+        st.session_state.valor_entrada = (
+            valor_compra
+        )
+
+        st.session_state.operacao_aberta = (
+            True
+        )
 
         st.success(
-            "Operação simulada criada."
-        )
-
-        st.write(
-            f"**Ativo:** {st.session_state['crypto']}"
-        )
-
-        st.write(
-            f"**Valor:** US$ {valor:,.2f}"
-        )
-
-        st.write(
-            f"**Preço:** US$ {price:,.2f}"
-        )
-
-        st.write(
-            f"**Quantidade:** {quantidade:.8f}"
-        )
-
-        st.write(
-            f"**Sinal no momento:** {result['signal']}"
+            "🟢 Compra simulada realizada."
         )
 
 
 # =========================================================
-# RODAPÉ
+# OPERAÇÃO ABERTA
+# =========================================================
+
+if st.session_state.operacao_aberta:
+
+    st.subheader(
+        "📌 Operação aberta"
+    )
+
+    preco_atual = 0
+
+    if st.session_state.analise:
+
+        preco_atual = (
+            st.session_state
+            .analise["preco"]
+        )
+
+    valor_atual = (
+        st.session_state.moedas
+        * preco_atual
+    )
+
+    resultado_operacao = (
+        valor_atual
+        - st.session_state.valor_entrada
+    )
+
+    st.write(
+        f"Quantidade: "
+        f"**{st.session_state.moedas:.8f}**"
+    )
+
+    st.write(
+        f"Preço de entrada: "
+        f"**US$ {st.session_state.preco_entrada:,.2f}**"
+    )
+
+    st.write(
+        f"Valor atual: "
+        f"**US$ {valor_atual:,.2f}**"
+    )
+
+    st.write(
+        f"Resultado: "
+        f"**US$ {resultado_operacao:,.2f}**"
+    )
+
+
+    if st.button(
+        "🔴 VENDER SIMULADO",
+        use_container_width=True
+    ):
+
+        self_resultado = resultado_operacao
+
+        st.session_state.saldo += (
+            valor_atual
+        )
+
+        registro = {
+
+            "data": datetime.now().strftime(
+                "%d/%m/%Y %H:%M"
+            ),
+
+            "ativo": (
+                st.session_state.crypto
+            ),
+
+            "entrada": (
+                st.session_state.preco_entrada
+            ),
+
+            "saida": preco_atual,
+
+            "resultado": self_resultado
+        }
+
+        st.session_state.historico.append(
+            registro
+        )
+
+        if self_resultado >= 0:
+
+            st.session_state.acertos += 1
+
+        else:
+
+            st.session_state.erros += 1
+
+        st.session_state.moedas = 0
+
+        st.session_state.preco_entrada = 0
+
+        st.session_state.valor_entrada = 0
+
+        st.session_state.operacao_aberta = False
+
+        st.success(
+            "🔴 Venda simulada realizada."
+        )
+
+        st.rerun()
+
+
+# =========================================================
+# ESTATÍSTICAS
 # =========================================================
 
 st.divider()
 
+st.header("🧠 Aprendizado")
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+
+    st.metric(
+        "Operações vencedoras",
+        st.session_state.acertos
+    )
+
+with c2:
+
+    st.metric(
+        "Operações perdedoras",
+        st.session_state.erros
+    )
+
+with c3:
+
+    total = (
+        st.session_state.acertos
+        + st.session_state.erros
+    )
+
+    if total > 0:
+
+        taxa = (
+            st.session_state.acertos
+            / total
+        ) * 100
+
+    else:
+
+        taxa = 0
+
+    st.metric(
+        "Taxa de acerto",
+        f"{taxa:.1f}%"
+    )
+
+
+# =========================================================
+# HISTÓRICO
+# =========================================================
+
+if st.session_state.historico:
+
+    st.header("📒 Histórico")
+
+    historico_df = pd.DataFrame(
+        st.session_state.historico
+    )
+
+    st.dataframe(
+        historico_df,
+        use_container_width=True
+    )
+
+
+# =========================================================
+# ATUALIZAÇÃO
+# =========================================================
+
+st.divider()
+
+if st.button(
+    "🔄 ATUALIZAR MERCADO",
+    use_container_width=True
+):
+
+    try:
+
+        with st.spinner(
+            "Atualizando..."
+        ):
+
+            df = buscar_mercado(
+                crypto_id
+            )
+
+            resultado = analisar(
+                df
+            )
+
+            st.session_state.analise = (
+                resultado
+            )
+
+            st.session_state.precos = (
+                df
+            )
+
+        st.rerun()
+
+    except Exception as erro:
+
+        st.error(
+            f"Erro ao atualizar: {erro}"
+        )
+
+
+st.divider()
+
 st.caption(
-    "Crypto AI Trader V2 • Paper Trading"
+    "Crypto AI Trader V3 • "
+    "Sistema experimental de Paper Trading"
 )
 
 st.caption(
-    "Este sistema é experimental e não executa "
-    "ordens reais."
+    "Nenhuma ordem real é enviada para corretoras."
 )
