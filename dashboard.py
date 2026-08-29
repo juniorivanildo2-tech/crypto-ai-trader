@@ -159,11 +159,10 @@ if price is not None:
                 "Mercado sem tendência clara."
             )
 
-   except Exception as e:
-    signal = "HOLD"
-
-    reason = f"Erro na análise: {e}" 
-        )
+           except Exception as e:
+            signal = "HOLD"
+            reason = f"Erro na análise: {e}"
+)
 
 
 st.metric(
