@@ -159,12 +159,10 @@ if price is not None:
                 "Mercado sem tendência clara."
             )
 
-    except Exception as e:
+   except Exception as e:
+    signal = "HOLD"
 
-        signal = "HOLD"
-
-        reason = (
-            "Não foi possível realizar a análise."
+    reason = f"Erro na análise: {e}" 
         )
 
 
