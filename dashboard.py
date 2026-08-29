@@ -1,4 +1,6 @@
 import streamlit as st
+import urllib.request
+import json
 
 st.set_page_config(
     page_title="Crypto AI Trader",
@@ -10,6 +12,41 @@ st.title("₿ Crypto AI Trader")
 st.subheader("Paper Trading V1")
 
 st.divider()
+
+st.header("📊 Mercado")
+
+crypto = st.selectbox(
+    "Escolha a criptomoeda",
+    ["Bitcoin (BTC)", "Ethereum (ETH)", "Solana (SOL)"]
+)
+
+symbols = {
+    "Bitcoin (BTC)": "BTCUSDT",
+    "Ethereum (ETH)": "ETHUSDT",
+    "Solana (SOL)": "SOLUSDT"
+}
+
+symbol = symbols[crypto]
+
+try:
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    response = urllib.request.urlopen(url, timeout=10)
+    data = json.loads(response.read())
+    price = float(data["price"])
+
+    st.metric(
+        "Preço atual",
+        f"${price:,.2f}"
+    )
+
+    st.success("🟢 Mercado conectado")
+
+except Exception as e:
+    st.error("Não foi possível obter o preço agora.")
+
+st.divider()
+
+st.header("💰 Conta Virtual")
 
 col1, col2, col3 = st.columns(3)
 
@@ -24,23 +61,4 @@ with col3:
 
 st.divider()
 
-st.header("📊 Mercado")
-
-crypto = st.selectbox(
-    "Escolha a criptomoeda",
-    ["Bitcoin (BTC)", "Ethereum (ETH)", "Solana (SOL)"]
-)
-
-st.write("Criptomoeda selecionada:", crypto)
-
-st.header("🤖 Sinal da IA")
-
-st.info("HOLD — aguardando análise")
-
-st.divider()
-
-st.header("📜 Histórico de operações")
-
-st.write("Nenhuma operação realizada.")
-
-st.caption("⚠️ V1 em PAPER TRADING — nenhuma ordem real será enviada.")
+st.info("🤖 IA Trader: aguardando sinais de mercado...")
