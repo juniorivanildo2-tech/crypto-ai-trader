@@ -159,7 +159,7 @@ if price is not None:
                 "Mercado sem tendência clara."
             )
 
-    except Exception:
+    except Exception as e:
 
         signal = "HOLD"
 
