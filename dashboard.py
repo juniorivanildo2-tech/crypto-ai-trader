@@ -6,7 +6,8 @@ st.set_page_config(
     page_title="Crypto AI Trader",
     page_icon="₿",
     layout="wide"
-)if "trader" not in st.session_state:
+)
+if "trader" not in st.session_state:
     st.session_state.trader = PaperTrader(10000.0)
 
 trader = st.session_state.trader
