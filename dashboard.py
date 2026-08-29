@@ -1,12 +1,15 @@
 import streamlit as st
 import urllib.request
 import json
-
+from paper_trader import PaperTrader
 st.set_page_config(
     page_title="Crypto AI Trader",
     page_icon="₿",
     layout="wide"
-)
+)if "trader" not in st.session_state:
+    st.session_state.trader = PaperTrader(10000.0)
+
+trader = st.session_state.trader
 
 st.title("₿ Crypto AI Trader")
 st.subheader("Paper Trading V2")
