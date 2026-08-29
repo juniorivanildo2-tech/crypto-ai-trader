@@ -29,10 +29,21 @@ symbols = {
 symbol = symbols[crypto]
 
 try:
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    ids = {
+        "Bitcoin (BTC)": "bitcoin",
+        "Ethereum (ETH)": "ethereum",
+        "Solana (SOL)": "solana"
+    }
+
+    url = (
+        "https://api.coingecko.com/api/v3/simple/price"
+        f"?ids={ids[crypto]}&vs_currencies=usd"
+    )
+
     response = urllib.request.urlopen(url, timeout=10)
     data = json.loads(response.read())
-    price = float(data["price"])
+
+    price = float(data[ids[crypto]]["usd"])
 
     st.metric(
         "Preço atual",
@@ -41,7 +52,7 @@ try:
 
     st.success("🟢 Mercado conectado")
 
-except Exception as e:
+except Exception:
     st.error("Não foi possível obter o preço agora.")
 
 st.divider()
