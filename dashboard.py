@@ -48,14 +48,14 @@ try:
 
     st.header("🤖 Sinal do Trader")
 
-    # Estratégia inicial de segurança:
+    inicial de segurança:
     # nesta versão o sistema ainda não compra nem vende.
     # Ele apenas monitora o mercado.
 
     signal = "HOLD"
     reason = "Aguardando análise dos dados históricos."
-
-    st.metric("Sinal atual", signal)
+    
+    st.metric("Sinal atual", sinal)
 
     st.warning(
         f"🟡 {reason}"
